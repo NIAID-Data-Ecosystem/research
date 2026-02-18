@@ -320,25 +320,78 @@ class ProgramCollectionsGenerator:
                 if not write_staging and not write_production:
                     continue
 
+                # Parse grant IDs once — used for both records search and
+                # the fundingIdentifiers field in the correction JSON so the
+                # hub can match new records on the fly by funding.
+                search_grants = self._parse_search_grants(
+                    row, act_codes, ic_codes
+                )
+
                 if write_staging:
-                    self._create_metadata_file(row, 'staging')
-                    self._create_records_file(row, 'staging', act_codes,
-                                              ic_codes, control_transferred)
+                    self._create_metadata_file(
+                        row, 'staging',
+                        funding_identifiers=search_grants,
+                    )
+                    self._create_records_file(
+                        row, 'staging', search_grants,
+                        control_transferred,
+                    )
                     logger.info(
                         f"Generated staging files for {filename}")
 
                 if write_production:
-                    self._create_metadata_file(row, 'production')
-                    self._create_records_file(row, 'production', act_codes,
-                                              ic_codes, control_transferred)
+                    self._create_metadata_file(
+                        row, 'production',
+                        funding_identifiers=search_grants,
+                    )
+                    self._create_records_file(
+                        row, 'production', search_grants,
+                        control_transferred,
+                    )
                     logger.info(
                         f"Generated production files for {filename}")
 
             except Exception as e:
                 logger.error(f"Error processing {filename}: {e}")
 
-    def _create_metadata_file(self, row: pd.Series, environment: str):
-        """Create metadata correction file"""
+    def _parse_search_grants(self, row: pd.Series,
+                             act_codes: List[str],
+                             ic_codes: List[str]) -> List[str]:
+        """Parse grant IDs from the row into searchable patterns.
+
+        Returns a deduplicated list of patterns like 'AI123456' that can
+        be used both for API record search and for on-the-fly funding
+        matching in the hub upload wrapper.
+        """
+        grant_texts = self.parse_array_text(row['fundingIDList'])
+        prior_grants = self.parse_array_text(
+            row.get('PriorProjectGrantIDs', ''))
+
+        search_grants = []
+        seen = set()
+        for grant_text in grant_texts + prior_grants:
+            grant_text = grant_text.replace("*", "").strip()
+            parsed = self.parse_grant_id(grant_text, act_codes, ic_codes)
+
+            if (parsed['icCode'] != 'not found' and
+                    parsed['serialNum'] != 'not found'):
+                pattern = parsed['icCode'] + parsed['serialNum']
+            else:
+                pattern = grant_text
+
+            if pattern and pattern not in seen:
+                search_grants.append(pattern)
+                seen.add(pattern)
+
+        return search_grants
+
+    def _create_metadata_file(self, row: pd.Series, environment: str,
+                              funding_identifiers: List[str] = None):
+        """Create metadata correction file.
+
+        When *funding_identifiers* is provided, they are embedded in the
+        JSON so the hub can match new records by funding on the fly.
+        """
         filename = row['fileName']
         alt_names = self.parse_array_text(row.get('alternateName', ''))
         parent_orgs = self.parse_array_text(row.get('parentOrganization', ''))
@@ -358,6 +411,10 @@ class ProgramCollectionsGenerator:
 
         output_data = {"sourceOrganization": [metadata]}
 
+        # Include funding identifiers for real-time matching in the hub.
+        if funding_identifiers:
+            output_data["fundingIdentifiers"] = funding_identifiers
+
         # Write file
         if environment == 'production':
             output_dir = (
@@ -375,27 +432,13 @@ class ProgramCollectionsGenerator:
             json.dump(output_data, f, indent=4)
 
     def _create_records_file(self, row: pd.Series, environment: str,
-                             act_codes: List[str], ic_codes: List[str],
+                             search_grants: List[str],
                              control_transferred: List[str]):
-        """Create records file"""
+        """Create records file.
+
+        *search_grants* is pre-parsed by ``_parse_search_grants``.
+        """
         filename = row['fileName']
-
-        # Parse grants
-        grant_texts = self.parse_array_text(row['fundingIDList'])
-        prior_grants = self.parse_array_text(
-            row.get('PriorProjectGrantIDs', ''))
-
-        # Process grants to get searchable IDs
-        search_grants = []
-        for grant_text in grant_texts + prior_grants:
-            grant_text = grant_text.replace("*", "").strip()
-            parsed = self.parse_grant_id(grant_text, act_codes, ic_codes)
-
-            if (parsed['icCode'] != 'not found' and
-                    parsed['serialNum'] != 'not found'):
-                search_grants.append(parsed['icCode'] + parsed['serialNum'])
-            else:
-                search_grants.append(grant_text)
 
         # Search for records
         record_ids = self.search_records(search_grants, environment)

@@ -24,3 +24,5 @@ tool_suitability_research/text2term_test/cache/*
 # Google Service Account Keys (sensitive)
 **/service-account-key.json
 **/*service-account*.json
+
+venv
